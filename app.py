@@ -16,6 +16,33 @@ try:
 except Exception as e:
     st.error(f"Gagal memuat dataset: {e}")
     st.stop()
+    
+import json
+try:
+    with open("store_regions.geojson", "r", encoding="utf-8") as f:
+        gj = json.load(f)
+except FileNotFoundError:
+    gj = None
+    
+#helper function untuk mendeteksi properti fitur yang cocok dengan nilai Store_Location
+def detect_feature_prop(geojson, sample_values, top_n=1):
+    if not geojson:
+        return None
+    props = geojson.get("features", [])
+    if not props:
+        return None
+    keys = set()
+    for feat in props[:min(50, len(props))]:
+        keys.update(feat.get("properties", {}).keys())
+    
+    best = (None, 0)
+    sample_set = set(sample_values)
+    for k in keys:
+        vals = {str(feat.get("properties", {}).get(k, "")).strip() for feat in props}
+        overlap = len(sample_set & vals)
+        if overlap > best[1]:
+            best = (k, overlap)
+    return best[0] if best[1] > 0 else None
 
 # persiapan data
 df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -23,6 +50,20 @@ df["Month"] = df["Date"].dt.to_period("M").astype(str)
 df["Year"] = df["Date"].dt.year
 df["Total_Amount"] = df["Price"]  
 df["Unit_Price"] = np.where(df["Quantity"] > 0, df["Price"] / df["Quantity"], np.nan)
+
+#set lokasi toko ke koordinat lat/lon
+store_coords = {
+    "New York": ( 40.730610, -73.935242),
+    "Phoenix": ( 33.4484, -112.0740),
+    "Philadelphia": ( 39.9526, -75.1652),
+    "San Antonio": ( 29.4241, -98.4936),
+    "Chicago": ( 41.8781, -87.6298),
+    "Houston": ( 29.7604, -95.3698),
+    "Los Angeles": ( 34.0522, -118.2437),
+}
+
+df["Store_Latitude"] = df["Store_Location"].map(lambda s: store_coords.get(s, (np.nan, np.nan))[0])
+df["Store_Longitude"] = df["Store_Location"].map(lambda s: store_coords.get(s, (np.nan, np.nan))[1])
 
 # Layout utama 
 tabs = st.tabs([
@@ -60,21 +101,61 @@ with tabs[0]:
             cat_counts = df[col].value_counts().reset_index()
             cat_counts.columns = [col, "Count"]
 
-        fig = px.bar(
-            cat_counts,
-            x=col,
-            y="Count",
-            color="Count",
-            color_continuous_scale="viridis",
-            text_auto=True,
-        )
-        fig.update_layout(
-            xaxis_title=col,
-            yaxis_title="amount",
-            template="plotly_white",
-            height=400,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        
+        if col == "Store_Location":
+                cat_counts = df[col].value_counts().reset_index()
+                cat_counts.columns = [col, "Count"]
+
+                feature_prop = detect_feature_prop(gj, cat_counts[col].astype(str).unique())
+                if feature_prop:
+                    featureidkey = f"properties.{feature_prop}"
+                else:
+                    featureidkey = None
+
+                if gj and featureidkey:
+                    try:
+                        # choropleth menggunakan geojson polygons
+                        fig = px.choropleth_mapbox(
+                            cat_counts,
+                            geojson=gj,
+                            locations=col,
+                            color="Count",
+                            featureidkey=featureidkey,
+                            color_continuous_scale="YlOrRd",
+                            mapbox_style="carto-positron",
+                            zoom=6,
+                            opacity=0.7,
+                            title=f"{col}",
+                            center={"lat": df["Store_Latitude"].mean() if df["Store_Latitude"].notna().any() else 37.0902,
+                                    "lon": df["Store_Longitude"].mean() if df["Store_Longitude"].notna().any() else -95.7129},
+                        )
+                        fig.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, height=520, title_x=0.5)
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Choropleth gagal: {e}")
+                        # fallback
+                        fig = px.bar(cat_counts, x=col, y="Count", color="Count", text_auto=True)
+                        fig.update_layout(height=400, title_x=0.5)
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("GeoJSON tidak ditemukan atau property tidak cocok — menampilkan bar chart.")
+                    fig = px.bar(cat_counts, x=col, y="Count", color="Count", text_auto=True)
+                    fig.update_layout(height=400, title_x=0.5)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            fig = px.bar(
+                cat_counts,
+                x=col,
+                y="Count",
+                color="Count",
+                color_continuous_scale="viridis",
+                text_auto=True,
+                title=" "
+            )
+            fig.update_layout(xaxis_title=col, yaxis_title="amount", template="plotly_white", height=400, title_x=0.5)
+            st.plotly_chart(fig, use_container_width=True)
+
         
     st.markdown("Anggota kelompok:")
     st.markdown("- Naufal Dzakwan Zakianto")
@@ -135,18 +216,25 @@ with tabs[1]:
         .reset_index()
         .sort_values("Year")
     )
+    
+    #--- Tren Tahunan ---
 
-    fig2 = px.bar(
+    fig_year_line = px.line(
         yearly_sales,
         x="Year",
         y="Quantity",
-        color="Quantity",
-        color_continuous_scale="Blues",
-        text_auto=".5s",
-        title=f"Total Sales by Year — {selected_model}",
+        markers=True,
+        title=f"📈 Annual Sales Trend ({selected_model})",
+        color_discrete_sequence=["#e6550d"],
     )
-    fig2.update_layout(template="plotly_white", title_x=0.5)
-    st.plotly_chart(fig2, use_container_width=True)
+    fig_year_line.update_layout(
+        template="plotly_white",
+        title_x=0.5,
+        xaxis_title="Year",
+        yaxis_title="Quantity Sold",
+        xaxis=dict(tickmode="linear", dtick=1)
+    )
+    st.plotly_chart(fig_year_line, use_container_width=True)
 
  
     st.markdown("### Top Salesperson")
@@ -264,12 +352,6 @@ with tabs[2]:
     st.plotly_chart(fig_heatmap, use_container_width=True)
 
 
-    chart_type = st.radio(
-        "Choose Chart Type:",
-        ["Grouped Bar Chart", "Stacked Bar Chart"],
-        horizontal=True
-    )
-
     bike_sales_location = (
         df.groupby(["Store_Location", "Bike_Model"])["Total_Amount"]
         .sum()
@@ -285,7 +367,7 @@ with tabs[2]:
     else:
         filtered_sales = bike_sales_location
 
-    barmode = "group" if chart_type == "Grouped Bar Chart" else "stack"
+    barmode = "group" 
 
     fig_sales = px.bar(
         filtered_sales,
